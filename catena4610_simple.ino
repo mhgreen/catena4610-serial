@@ -401,11 +401,11 @@ void fillBuffer(TxBuffer_t &b)
                 gSi1133.start(true);
 
         b.begin();
-	FlagsSensor2 flag;
+        FlagsSensor2 flag;
 
-	flag = FlagsSensor2(0);
+        flag = FlagsSensor2(0);
 
-	b.put(FormatSensor2); /* the flag for this record format */
+        b.put(FormatSensor2); /* the flag for this record format */
         uint8_t * const pFlag = b.getp();
         b.put(0x00); /* will be set to the flags */
 
@@ -413,7 +413,7 @@ void fillBuffer(TxBuffer_t &b)
         float vBat = gCatena.ReadVbat();
         gCatena.SafePrintf("vBat:    %d mV\n", (int) (vBat * 1000.0f));
         b.putV(vBat);
-	flag |= FlagsSensor2::FlagVbat;
+        flag |= FlagsSensor2::FlagVbat;
 
         // vBus is sent as 5000 * v
         float vBus = gCatena.ReadVbus();
@@ -424,26 +424,26 @@ void fillBuffer(TxBuffer_t &b)
         if (gCatena.getBootCount(bootCount))
                 {
                 b.putBootCountLsb(bootCount);
-		flag |= FlagsSensor2::FlagBoot;
+                flag |= FlagsSensor2::FlagBoot;
                 }
 
         if (fBme)
                 {
-		Adafruit_BME280::Measurements m = gBme.readTemperaturePressureHumidity();
+                Adafruit_BME280::Measurements m = gBme.readTemperaturePressureHumidity();
                         // temperature is 2 bytes from -0x80.00 to +0x7F.FF degrees C
-		// pressure is 2 bytes, hPa * 10.
-		// humidity is one byte, where 0 == 0/256 and 0xFF == 255/256.
+                // pressure is 2 bytes, hPa * 10.
+                // humidity is one byte, where 0 == 0/256 and 0xFF == 255/256.
                         gCatena.SafePrintf(
-		        "BME280:  T: %d P: %d RH: %d\n",
-		        (int) m.Temperature,
-		        (int) m.Pressure,
+                        "BME280:  T: %d P: %d RH: %d\n",
+                        (int) m.Temperature,
+                        (int) m.Pressure,
                                 (int) m.Humidity
                                 );
                         b.putT(m.Temperature);
-		b.putP(m.Pressure);
-		b.putRH(m.Humidity);
+                b.putP(m.Pressure);
+                b.putRH(m.Humidity);
 
-		flag |= FlagsSensor2::FlagTPH;
+                flag |= FlagsSensor2::FlagTPH;
                 }
 
         if (fLight)
@@ -465,8 +465,8 @@ void fillBuffer(TxBuffer_t &b)
                         data[2]
                         );
                 b.putLux(data[1]);
-		flag |= FlagsSensor2::FlagLux;
-		}
+                flag |= FlagsSensor2::FlagLux;
+                }
 
 
         *pFlag = uint8_t(flag);
