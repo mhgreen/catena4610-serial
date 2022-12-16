@@ -53,10 +53,8 @@ enum
         // Actual time will be a little longer because have to
         // add measurement and broadcast time, but we attempt
         // to compensate for the gross effects below.
-        CATCFG_T_CYCLE = 6 * 60,             // every 6 minutes
+        CATCFG_T_CYCLE = 5 * 60,             // every 5 minutes
         CATCFG_T_CYCLE_TEST = 30,            // every 30 seconds
-        CATCFG_T_CYCLE_INITIAL = 30,         // every 30 seconds initially
-        CATCFG_INTERVAL_COUNT_INITIAL = 10,  // repeat for 5 minutes
         CATCFG_T_REBOOT = 30 * 24 * 60 * 60, // reboot every 30 days
 };
 
@@ -71,26 +69,18 @@ enum
         CATCFG_INTERVAL_COUNT = 30,
 };
 
-constexpr uint32_t CATCFG_GetInterval(uint32_t tCycle)
-{
-        return (tCycle < CATCFG_T_OVERHEAD + 1)
-                   ? 1
-                   : tCycle - CATCFG_T_OVERHEAD;
-}
-
 enum
 {
-        CATCFG_T_INTERVAL = CATCFG_GetInterval(CATCFG_T_CYCLE),
+        CATCFG_T_INTERVAL = CATCFG_T_CYCLE,
 };
 
 static struct STRUCT
 {
         uint32_t utcTime;
         uint16_t distance;
-} waterLevelReading;
+        int16_t waterTemp;
+} waterReading;
 static SerialTransfer sensorTransfer;
-const functionPtr serialCallbackArr[] = {incomingSensorData};
-static bool doUplink = false;
 
 // forwards
 static void settleDoneCb(osjob_t *pSendJob);
@@ -100,7 +90,9 @@ static void sleepDoneCb(osjob_t *pSendJob);
 static Arduino_LoRaWAN::SendBufferCbFn sendBufferDoneCb;
 static Arduino_LoRaWAN::ReceivePortBufferCbFn receiveMessage;
 static void incomingSensorData();
+const functionPtr serialCallbackArr[] = {incomingSensorData};
 static void sensorTransferCheck();
+void fillBuffer(TxBuffer_t &b);
 
 /****************************************************************************\
 |
@@ -177,45 +169,30 @@ bool g_fPrintedSleeping = false;
 static osjob_t sensorJob;
 void sensorJob_cb(osjob_t *pJob);
 
-// the cycle time to use
-unsigned gTxCycle;
-// remaining before we reset to default
-unsigned gTxCycleCount;
+class SensorTransfer : public cPollableObject {
+public:
+        virtual void poll() override
+        {
+                sensorTransfer.tick();
+                // gCatena.SafePrintf("\n");
+                // gCatena.SafePrintf("SensorTransfer poll()\n");
+        };
+};
 
-/*
-
-Name:	setup()
-
-Function:
-        Arduino setup function.
-
-Definition:
-        void setup(
-            void
-            );
-
-Description:
-        This function is called by the Arduino framework after
-        basic framework has been initialized. We initialize the sensors
-        that are present on the platform, set up the LoRaWAN connection,
-        and (ultimately) return to the framework, which then calls loop()
-        forever.
-
-Returns:
-        No explicit result.
-
-*/
+SensorTransfer sensorTest;
 
 void setup(void)
 {
         gCatena.begin();
 
         setup_platform();
-        setup_light();
+        // setup_light();
         setup_bme280();
         setup_flash();
         setup_uplink();
+
         setup_serialSensor();
+        gCatena.registerObject(&sensorTest);
 }
 
 void setup_platform(void)
@@ -252,7 +229,6 @@ void setup_platform(void)
 #endif
 
         gLoRaWAN.SetReceiveBufferBufferCb(receiveMessage);
-        setTxCycleTime(CATCFG_T_CYCLE_INITIAL, CATCFG_INTERVAL_COUNT_INITIAL);
 
         Catena::UniqueID_string_t CpuIDstring;
 
@@ -375,8 +351,6 @@ void setup_uplink(void)
                 {
                         gLed.Set(LedPattern::Joining);
 
-                        /* trigger a join by sending the first packet */
-                        startSendingUplink();
                 }
         }
 }
@@ -396,7 +370,6 @@ void setup_serialSensor(void)
 // The Arduino loop routine -- in our case, we just drive the other loops.
 // If we try to do too much, we can break the LMIC radio. So the work is
 // done by outcalls scheduled from the LMIC os loop.
-void fillBuffer(TxBuffer_t &b);
 
 void loop()
 {
@@ -412,40 +385,43 @@ void loop()
                 // since the light sensor was stopped in fillbuffer, restart it.
         }
 
-        sensorTransferCheck();
 }
 
 void fillBuffer(TxBuffer_t &b)
 {
-        if (fLight)
-                gSi1133.start(true);
+        b.put2u(waterReading.distance);
+        b.put4u(waterReading.utcTime);
+        b.put2((int32_t)waterReading.waterTemp);
+        
+        // if (fLight)
+        //         gSi1133.start(true);
 
-        b.begin();
-        FlagsSensor2 flag;
+        // b.begin();
+        // FlagsSensor2 flag;
 
-        flag = FlagsSensor2(0);
+        // flag = FlagsSensor2(0);
 
-        b.put(FormatSensor2); /* the flag for this record format */
-        uint8_t *const pFlag = b.getp();
-        b.put(0x00); /* will be set to the flags */
+        // b.put(FormatSensor2); /* the flag for this record format */
+        // uint8_t *const pFlag = b.getp();
+        // b.put(0x00); /* will be set to the flags */
 
         // vBat is sent as 5000 * v
         float vBat = gCatena.ReadVbat();
         gCatena.SafePrintf("vBat:    %d mV\n", (int)(vBat * 1000.0f));
         b.putV(vBat);
-        flag |= FlagsSensor2::FlagVbat;
+        // flag |= FlagsSensor2::FlagVbat;
 
         // vBus is sent as 5000 * v
         float vBus = gCatena.ReadVbus();
         gCatena.SafePrintf("vBus:    %d mV\n", (int)(vBus * 1000.0f));
         fUsbPower = (vBus > 3.0) ? true : false;
 
-        uint32_t bootCount;
-        if (gCatena.getBootCount(bootCount))
-        {
-                b.putBootCountLsb(bootCount);
-                flag |= FlagsSensor2::FlagBoot;
-        }
+        // uint32_t bootCount;
+        // if (gCatena.getBootCount(bootCount))
+        // {
+        //         b.putBootCountLsb(bootCount);
+        //         flag |= FlagsSensor2::FlagBoot;
+        // }
 
         if (fBme)
         {
@@ -459,34 +435,34 @@ void fillBuffer(TxBuffer_t &b)
                     (int)m.Pressure,
                     (int)m.Humidity);
                 b.putT(m.Temperature);
-                b.putP(m.Pressure);
-                b.putRH(m.Humidity);
+                // b.putP(m.Pressure);
+                // b.putRH(m.Humidity);
 
-                flag |= FlagsSensor2::FlagTPH;
+                // flag |= FlagsSensor2::FlagTPH;
         }
 
-        if (fLight)
-        {
-                /* Get a new sensor event */
-                uint16_t data[3];
+        // if (fLight)
+        // {
+        //         /* Get a new sensor event */
+        //         uint16_t data[3];
 
-                while (!gSi1133.isOneTimeReady())
-                {
-                        yield();
-                }
+        //         while (!gSi1133.isOneTimeReady())
+        //         {
+        //                 yield();
+        //         }
 
-                gSi1133.readMultiChannelData(data, 3);
-                gSi1133.stop();
-                gCatena.SafePrintf(
-                    "Si1133:  %u IR, %u White, %u UV\n",
-                    data[0],
-                    data[1],
-                    data[2]);
-                b.putLux(data[1]);
-                flag |= FlagsSensor2::FlagLux;
-        }
+        //         gSi1133.readMultiChannelData(data, 3);
+        //         gSi1133.stop();
+        //         gCatena.SafePrintf(
+        //             "Si1133:  %u IR, %u White, %u UV\n",
+        //             data[0],
+        //             data[1],
+        //             data[2]);
+        //         b.putLux(data[1]);
+        //         flag |= FlagsSensor2::FlagLux;
+        // }
 
-        *pFlag = uint8_t(flag);
+        // *pFlag = uint8_t(flag);
 }
 
 void startSendingUplink(void)
@@ -563,8 +539,6 @@ static void settleDoneCb(
         if (!g_fPrintedSleeping)
                 doSleepAlert(fDeepSleep);
 
-        /* count what we're up to */
-        updateSleepCounters();
 
         if (fDeepSleep)
                 doDeepSleep(pSendJob);
@@ -649,34 +623,12 @@ void doSleepAlert(const bool fDeepSleep)
                 gCatena.SafePrintf("using light sleep\n");
 }
 
-void updateSleepCounters(void)
-{
-        // update the sleep parameters
-        if (gTxCycleCount > 1)
-        {
-                // values greater than one are decremented and ultimately reset to default.
-                --gTxCycleCount;
-        }
-        else if (gTxCycleCount == 1)
-        {
-                // it's now one (otherwise we couldn't be here.)
-                gCatena.SafePrintf("resetting tx cycle to default: %u\n", CATCFG_T_CYCLE);
-
-                gTxCycleCount = 0;
-                gTxCycle = CATCFG_T_CYCLE;
-        }
-        else
-        {
-                // it's zero. Leave it alone.
-        }
-}
-
 void doDeepSleep(osjob_t *pJob)
 {
         bool const fDeepSleepTest = gCatena.GetOperatingFlags() &
                                     static_cast<uint32_t>(gCatena.OPERATING_FLAGS::fDeepSleepTest);
-        uint32_t const sleepInterval = CATCFG_GetInterval(
-            fDeepSleepTest ? CATCFG_T_CYCLE_TEST : gTxCycle);
+        uint32_t const sleepInterval = 
+            fDeepSleepTest ? CATCFG_T_CYCLE_TEST : CATCFG_T_CYCLE;
 
         /* ok... now it's time for a deep sleep */
         gLed.Set(LedPattern::Off);
@@ -712,7 +664,7 @@ void deepSleepRecovery(void)
 
 void doLightSleep(osjob_t *pJob)
 {
-        uint32_t interval = sec2osticks(CATCFG_GetInterval(gTxCycle));
+        uint32_t interval = sec2osticks(CATCFG_T_CYCLE);
 
         gLed.Set(LedPattern::Sleeping);
 
@@ -743,7 +695,7 @@ static void sleepDoneCb(
 static void warmupDoneCb(
     osjob_t *pJob)
 {
-        startSendingUplink();
+        // startSendingUplink();
 }
 
 static void receiveMessage(
@@ -789,50 +741,16 @@ static void receiveMessage(
                 txCount = pMessage[2];
         }
 
-        setTxCycleTime(txCycle, txCount);
-}
-
-void setTxCycleTime(
-    unsigned txCycle,
-    unsigned txCount)
-{
-        if (txCount > 0)
-                gCatena.SafePrintf(
-                    "message cycle time %u seconds for %u messages\n",
-                    txCycle, txCount);
-        else
-                gCatena.SafePrintf(
-                    "message cycle time %u seconds indefinitely\n",
-                    txCycle);
-
-        gTxCycle = txCycle;
-        gTxCycleCount = txCount;
+        // setTxCycleTime(txCycle, txCount);
 }
 
 static void incomingSensorData()
 {
-        waterLevelReading.distance = 0;
-        waterLevelReading.utcTime = 0;
-        sensorTransfer.rxObj(waterLevelReading);
-        gCatena.SafePrintf("time: %u\n", waterLevelReading.utcTime);
-        gCatena.SafePrintf("distance: %u\n", waterLevelReading.distance);
-
-        // If the sensor returned 0, indicating that nothing was collected,
-        // or if the sensor returns 5000 or 9999, indicating that no target is
-        // visible in the field of view, then don't upload the value.
-        if (waterLevelReading.distance == 0 || waterLevelReading.distance == 5000 || waterLevelReading.distance == 9999)
-        {
-                gCatena.SafePrintf("doUplink = false\n");
-                doUplink = false;
-        }
-        else
-        {
-                gCatena.SafePrintf("doUplink = true\n");
-                doUplink = true;
-        }
-}
-
-static void sensorTransferCheck()
-{
-        sensorTransfer.tick();
+        waterReading.distance = 0;
+        waterReading.utcTime = 0;
+        sensorTransfer.rxObj(waterReading);
+        gCatena.SafePrintf("time: %u\n", waterReading.utcTime);
+        gCatena.SafePrintf("distance: %u\n", waterReading.distance);
+        gCatena.SafePrintf("water temperature: %u\n", waterReading.waterTemp);
+        startSendingUplink();
 }
